@@ -205,6 +205,19 @@ class Banana2BatchNode:
                    "group10_image", "group10_url", "group10_response", "group10_info", # group10
                    "stats")  # 统计
 
+    OUTPUT_IS_LIST = (True, False, False,  # images为列表，其他为单个值
+                      False, False, False, False,  # group1
+                      False, False, False, False,  # group2
+                      False, False, False, False,  # group3
+                      False, False, False, False,  # group4
+                      False, False, False, False,  # group5
+                      False, False, False, False,  # group6
+                      False, False, False, False,  # group7
+                      False, False, False, False,  # group8
+                      False, False, False, False,  # group9
+                      False, False, False, False,  # group10
+                      False)  # stats
+
     FUNCTION = "execute"
     OUTPUT_NODE = False
 
@@ -689,16 +702,19 @@ class Banana2BatchNode:
 
     async def _poll_task_status(self, group_id: int, task_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
         """轮询查询任务状态，每5秒查询一次"""
+        import time
         base_url = config["base_url"].rstrip("/")
         headers = {
             "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": "application/json"
         }
 
-        max_polls = 60  # 最多轮询60次（5分钟）
+        timeout = config.get("timeout", 200)  # 获取用户设置的超时时间
+        max_polls = min(60, timeout // 5)  # 最多轮询次数，同时考虑超时时间
         poll_count = 0
+        start_time = time.time()
 
-        while poll_count < max_polls:
+        while poll_count < max_polls and (time.time() - start_time) < timeout:
             poll_count += 1
 
             try:
@@ -764,7 +780,8 @@ class Banana2BatchNode:
                 continue
 
         # 超时
-        print(f"Banana2: 任务{group_id} 查询超时，已等待{max_polls * 5}秒")
+        elapsed_time = time.time() - start_time
+        print(f"Banana2: 任务{group_id} 查询超时，已等待{elapsed_time:.1f}秒 (设置超时: {timeout}秒)")
         return {
             "group_id": group_id,
             "success": False,
@@ -773,7 +790,7 @@ class Banana2BatchNode:
             "response_code": 2,
                 "info": json.dumps({
                     "status": "error",
-                    "message": f"异步查询超时，已等待{max_polls * 5}秒"
+                    "message": f"异步查询超时，已等待{elapsed_time:.1f}秒 (设置超时: {timeout}秒)"
                 }, ensure_ascii=False)
         }
 
@@ -801,6 +818,14 @@ class Banana2BatchNode:
                             print(f"Banana2: 任务{group_id} 图像生成成功 (Base64)")
                             # 根据response_format决定URL返回值
                             return_url = "b64_ok" if response_format == "b64_json" else image_url
+                            # 简化task_info，避免返回完整的b64_json
+                            simplified_task_info = {
+                                "task_id": task_info.get("task_id", ""),
+                                "status": task_info.get("status", ""),
+                                "progress": task_info.get("progress", ""),
+                                "submit_time": task_info.get("submit_time", ""),
+                                "finish_time": task_info.get("finish_time", "")
+                            }
                             return {
                                 "group_id": group_id,
                                 "success": True,
@@ -811,12 +836,20 @@ class Banana2BatchNode:
                                     "status": "success",
                                     "message": "图像生成成功",
                                     "format": "base64" if response_format == "b64_json" else "url",
-                                    "task_info": task_info
+                                    "task_info": simplified_task_info
                                 }, ensure_ascii=False)
                             }
                     else:
                         # URL格式，直接返回URL，不下载图片
                         print(f"Banana2: 任务{group_id} 图像生成成功 (URL): {image_url}")
+                        # 简化task_info，避免返回完整的b64_json
+                        simplified_task_info = {
+                            "task_id": task_info.get("task_id", ""),
+                            "status": task_info.get("status", ""),
+                            "progress": task_info.get("progress", ""),
+                            "submit_time": task_info.get("submit_time", ""),
+                            "finish_time": task_info.get("finish_time", "")
+                        }
                         return {
                             "group_id": group_id,
                             "success": True,
@@ -827,7 +860,7 @@ class Banana2BatchNode:
                                 "status": "success",
                                 "message": "图像生成成功",
                                 "format": "url",
-                                "task_info": task_info
+                                "task_info": simplified_task_info
                             }, ensure_ascii=False)
                         }
 
@@ -884,6 +917,12 @@ class Banana2BatchNode:
                         if image:
                             # 根据response_format决定URL返回值
                             return_url = "b64_ok" if response_format == "b64_json" else image_url
+                            # 简化task_info，避免返回完整的b64_json
+                            simplified_task_info = {
+                                "task_id": response_data.get("task_id", ""),
+                                "status": "SUCCESS",
+                                "format": response_format
+                            }
                             return {
                                 "group_id": group_id,
                                 "success": True,
@@ -894,12 +933,18 @@ class Banana2BatchNode:
                                     "status": "success",
                                     "message": "图像生成成功",
                                     "format": "base64" if response_format == "b64_json" else "url",
-                                    "task_info": response_data
+                                    "task_info": simplified_task_info
                                 }, ensure_ascii=False)
                             }
                     else:
                         # URL格式，直接返回URL，不下载图片
                         print(f"[INFO] URL格式响应，直接返回链接: {image_url}")
+                        # 简化task_info，避免返回完整的b64_json
+                        simplified_task_info = {
+                            "task_id": response_data.get("task_id", ""),
+                            "status": "SUCCESS",
+                            "format": response_format
+                        }
                         return {
                             "group_id": group_id,
                             "success": True,
@@ -910,7 +955,7 @@ class Banana2BatchNode:
                                 "status": "success",
                                 "message": "图像生成成功",
                                 "format": "url",
-                                "task_info": response_data
+                                "task_info": simplified_task_info
                             }, ensure_ascii=False)
                         }
 
@@ -953,6 +998,7 @@ class Banana2BatchNode:
                     img_data = base64.b64decode(data)
                     img_buffer = io.BytesIO(img_data)
                     img = Image.open(img_buffer)
+                    img.load()  # 确保图像数据被完全加载
 
                     # 对于base64数据，如果能成功打开图片，说明数据完整
                     # 不需要额外的verify()验证（verify()会关闭图片对象）
@@ -1019,9 +1065,10 @@ class Banana2BatchNode:
                         # 有图片数据（Base64格式），需要转换
                         tensor_image = self._pil_to_tensor(result["image"])
                         if tensor_image is not None:
-                            successful_images.append(tensor_image)
                             # 为group输出添加批次维度 [1, H, W, C]
                             group_image = tensor_image.unsqueeze(0)
+                            # 将批次格式的图像加入成功列表（保持每个元素为 [1, H, W, C]）
+                            successful_images.append(group_image)
                             group_outputs.extend([
                                 group_image,
                                 result["url"],
@@ -1072,15 +1119,15 @@ class Banana2BatchNode:
                     "未执行的任务"
                 ])
 
-        # 合并输出images：堆叠所有成功的图像
+        # 合并输出images：返回图像列表
         if successful_images:
-            # 总是堆叠为批次格式 [B, H, W, C]，即使只有一个图像
-            merged_images = torch.stack(successful_images)
-            print(f"[DEBUG] 合并图像形状: {merged_images.shape}")
+            merged_images = successful_images  # 直接返回列表，元素为 [1, H, W, C]
+            print(f"[DEBUG] 合并图像列表长度: {len(merged_images)}")
         else:
-            # 如果没有成功的图像，创建一个占位符图像
-            merged_images = torch.full((1, 64, 64, 3), 0.5)  # 灰色占位符 [B, H, W, C]
-            print(f"[DEBUG] 空合并图像形状: {merged_images.shape} (占位符)")
+            # 如果没有成功的图像，返回包含单个空图像（批次格式）的列表
+            empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            merged_images = [empty_image]  # 包含单个空图像的列表（批次格式）
+            print(f"[DEBUG] 空合并图像列表 (占位符)")
 
         # urls和responses作为JSON字符串
         urls_json = json.dumps(all_urls, ensure_ascii=False)
@@ -1151,13 +1198,13 @@ class Banana2BatchNode:
 
     def _get_empty_outputs(self) -> Tuple:
         """返回空的输出"""
-        # ComfyUI图像格式: torch.Tensor [H, W, C]，范围0-1
-        empty_image = torch.zeros((64, 64, 3), dtype=torch.float32)
+        # ComfyUI图像格式: torch.Tensor [B, H, W, C]，范围0-1（批次格式）
+        empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
-        # 合并输出
-        merged_outputs = [empty_image, "[]", "[]"]
+        # 合并输出 - images现在是列表格式（每项为批次格式tensor），返回包含单个空图像的列表
+        merged_outputs = [[empty_image], "[]", "[]"]
 
-        # 独立组输出 (10组 × 4)
+        # 独立组输出 (10组 × 4)，使用批次格式占位符
         group_outputs = []
         for _ in range(10):
             group_outputs.extend([empty_image, "", 0, "未执行的任务"])
