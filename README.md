@@ -31,12 +31,7 @@
    │       ├── banana2_batch_node.py
    │       ├── doubao_batch_node.py
    │       ├── model_compare_node.py
-   │       ├── nanobanana2_comfy_node.py
    │       ├── requirements.txt
-   │       ├── doubao_guide.md
-   │       ├── 自留/
-   │       │   └── config.py
-   │       ├── 需求及文档/
    │       └── README.md
    ```
 
@@ -298,18 +293,9 @@ AIYang_comfyui_myapi/
 ├── banana2_batch_node.py          # Comfly/BananaWebAPI批量并发节点
 ├── doubao_batch_node.py           # 豆包批量并发节点
 ├── model_compare_node.py          # 模型比较节点
-├── nanobanana2_comfy_node.py      # 其他NanoBanana节点
 ├── requirements.txt               # 依赖说明
-├── doubao_guide.md               # 豆包专属使用指南
 ├── README.md                      # 详细使用文档
-├── 自留/
-│   └── config.py                  # API配置示例
-└── 需求及文档/                    # 原始需求和API文档
-    ├── comfly-banana2文生图.txt
-    ├── comfly-banana2图生图.txt
-    ├── 即梦4.5.txt
-    ├── bananawebapi生图.txt
-    └── 需求清单.md
+
 ```
 
 ### 扩展开发
