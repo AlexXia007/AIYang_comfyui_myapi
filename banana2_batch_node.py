@@ -7,12 +7,98 @@ import asyncio
 import json
 import time
 import requests
+import uuid
+import datetime
 from typing import Dict, List, Tuple, Optional, Any
 import torch
 import numpy as np
 from PIL import Image
 import io
 import base64
+
+# OSS 上传相关导入
+try:
+    import oss2
+    OSS_AVAILABLE = True
+except ImportError:
+    OSS_AVAILABLE = False
+    print("[WARNING] oss2 not available, image URL upload will not work")
+
+
+def _pil_images_to_oss_urls(
+    images: List[Image.Image],
+    oss_config: Dict[str, str],
+    timeout_seconds: int = 30
+) -> List[str]:
+    """将PIL图像上传到阿里云OSS，返回图片URL列表"""
+    if not OSS_AVAILABLE:
+        raise Exception("oss2库不可用，无法上传图片到OSS")
+
+    # 检查OSS配置
+    required_keys = ["endpoint", "access_key_id", "access_key_secret", "bucket_name"]
+    for key in required_keys:
+        if key not in oss_config or not oss_config[key]:
+            raise Exception(f"OSS配置缺少必要参数: {key}")
+
+    endpoint = oss_config["endpoint"]
+    access_key_id = oss_config["access_key_id"]
+    access_key_secret = oss_config["access_key_secret"]
+    bucket_name = oss_config["bucket_name"]
+    object_prefix = oss_config.get("object_prefix", "uploads/")
+    use_signed_url = oss_config.get("use_signed_url", True)
+    signed_url_expire_seconds = int(oss_config.get("signed_url_expire_seconds", 3600))
+    security_token = oss_config.get("security_token", "")
+
+    # 初始化OSS客户端
+    auth = oss2.StsAuth(access_key_id, access_key_secret, security_token) if security_token else oss2.Auth(access_key_id, access_key_secret)
+    bucket = oss2.Bucket(auth, endpoint, bucket_name)
+
+    urls = []
+
+    for idx, pil_image in enumerate(images):
+        try:
+            # 将PIL图像转换为PNG字节数据
+            bio = io.BytesIO()
+            pil_image.save(bio, format="PNG")
+            image_bytes = bio.getvalue()
+
+            # 生成对象键
+            today = datetime.datetime.utcnow()
+            date_path = f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+            uid = uuid.uuid4().hex[:8]
+            suggested_name = f"banana_image_{uid}_{idx+1:04d}.png"
+            object_key = "/".join(x.strip("/\\") for x in [object_prefix, date_path, suggested_name] if x)
+            object_key = object_key.replace("\\", "/")
+
+            # 上传到OSS
+            headers = {"Content-Type": "image/png"}
+            result = bucket.put_object(object_key, image_bytes, headers=headers)
+
+            if not (200 <= result.status < 300):
+                raise Exception(f"OSS上传失败: status={result.status}")
+
+            # 生成URL
+            if use_signed_url:
+                url = bucket.sign_url("GET", object_key, signed_url_expire_seconds)
+            else:
+                # 构造公共URL
+                scheme = "https"
+                ep = endpoint
+                if endpoint.startswith("http://"):
+                    scheme = "http"
+                    ep = endpoint[len("http://"):]
+                elif endpoint.startswith("https://"):
+                    ep = endpoint[len("https://"):]
+                url = f"{scheme}://{bucket_name}.{ep}/{object_key}"
+
+            urls.append(url)
+            print(f"[DEBUG] 图片{idx+1}上传成功: {url}")
+
+        except Exception as e:
+            print(f"[ERROR] 图片{idx+1}上传失败: {str(e)}")
+            raise Exception(f"图片上传失败: {str(e)}")
+
+    return urls
 
 
 def _calculate_aspect_ratio(width: int, height: int) -> str:
@@ -109,9 +195,9 @@ class Banana2BatchNode:
             "api_key": ("STRING", {
                 "tooltip": "API密钥"
             }),
-            "model": (["nano-banana-2", "nano-banana-2-2k", "nano-banana-2-4k", "nano-banana"], {
-                "default": "nano-banana-2-2k",
-                "tooltip": "nano-banana系列模型"
+            "model": ("STRING", {
+                "default": "nano-banana-2",
+                "tooltip": "模型名称 (nano-banana系列)"
             }),
             "mode": (["Text2Img", "Img2Img"], {
                 "default": "Img2Img",
@@ -164,7 +250,46 @@ class Banana2BatchNode:
         }
 
         # 可选的组输入（可以为None）
-        optional = {}
+        optional = {
+            # OSS配置（用于图片上传）
+            "oss_endpoint": ("STRING", {
+                "default": "",
+                "tooltip": "阿里云OSS endpoint (如: https://oss-cn-hangzhou.aliyuncs.com)"
+            }),
+            "oss_access_key_id": ("STRING", {
+                "default": "",
+                "tooltip": "阿里云OSS AccessKey ID"
+            }),
+            "oss_access_key_secret": ("STRING", {
+                "default": "",
+                "tooltip": "阿里云OSS AccessKey Secret",
+                "password": True
+            }),
+            "oss_bucket_name": ("STRING", {
+                "default": "",
+                "tooltip": "阿里云OSS Bucket名称"
+            }),
+            "oss_object_prefix": ("STRING", {
+                "default": "banana-images/",
+                "tooltip": "OSS对象前缀路径"
+            }),
+            "oss_use_signed_url": ("BOOLEAN", {
+                "default": True,
+                "tooltip": "是否使用签名URL（更安全但有时效性）"
+            }),
+            "oss_signed_url_expire_seconds": ("INT", {
+                "default": 3600,
+                "min": 60,
+                "max": 604800,
+                "tooltip": "签名URL过期时间（秒）"
+            }),
+            "oss_security_token": ("STRING", {
+                "default": "",
+                "tooltip": "阿里云STS临时安全令牌（可选）",
+                "password": True
+            })
+        }
+
         for group in range(1, 11):
             for img_idx in range(1, 5):
                 optional[f"image_{group}.{img_idx}"] = ("IMAGE", {
@@ -317,7 +442,7 @@ class Banana2BatchNode:
             "provider": kwargs.get("provider", "comfly"),
             "base_url": kwargs.get("base_url", "https://ai.comfly.chat"),
             "api_key": kwargs.get("api_key", ""),
-            "model": kwargs.get("model", "nano-banana-2-2k"),
+            "model": kwargs.get("model", "nano-banana-2"),
             "mode": kwargs.get("mode", "Img2Img"),
             "aspect_ratio": kwargs.get("aspect_ratio", "auto"),
             "response_format": kwargs.get("response_format", "url"),
@@ -328,6 +453,21 @@ class Banana2BatchNode:
             "retry_count": kwargs.get("retry_count", 0),
             "node_enabled": kwargs.get("node_enabled", True)
         }
+
+        # 解析OSS配置
+        oss_config = {}
+        oss_keys = ["endpoint", "access_key_id", "access_key_secret", "bucket_name", "object_prefix", "use_signed_url", "signed_url_expire_seconds", "security_token"]
+        for key in oss_keys:
+            oss_param_key = f"oss_{key}"
+            value = kwargs.get(oss_param_key)
+            if value is not None and value != "":
+                oss_config[key] = value
+
+        if oss_config:
+            config["oss_config"] = oss_config
+            print(f"[DEBUG] OSS配置已启用: endpoint={oss_config.get('endpoint', 'N/A')}, bucket={oss_config.get('bucket_name', 'N/A')}")
+        else:
+            print(f"[DEBUG] OSS配置未启用，使用base64格式")
 
         # 调试输出配置
         print(f"[DEBUG] 配置解析结果: {config}")
@@ -471,19 +611,33 @@ class Banana2BatchNode:
         print(f"\n[DEBUG] 任务{task['group_id']} API请求构建:")
         print(f"  [URL] 请求URL: {api_url}")
         print(f"  [HEADERS] 请求头: {headers}")
-        print(f"  [PAYLOAD] 请求体: {payload}")
+        print(f"  [PAYLOAD] 请求体类型: {type(payload)}")
         print(f"  [IMAGES] 参考图片数量: {len(task['images'])}")
         print(f"  [PROMPT] 提示词: {task['prompt'][:100]}{'...' if len(task['prompt']) > 100 else ''}")
         print("-" * 30)
 
-        is_comfly_banana = config["provider"] == "comfly" and config["model"].startswith("nano-banana")
+        is_comfly_provider = config["provider"] == "comfly"
 
         # 发送请求
         try:
             has_images = len(task["images"]) > 0
+            print(f"[DEBUG] 任务{task['group_id']} 开始发送请求, has_images={has_images}, 图片数量={len(task['images'])}")
 
-            if has_images:
-                # 图生图：multipart/form-data
+            # 检查是否使用NanoBanana API（总是使用JSON）
+            is_nanobanana_local = config["provider"] in ["nanobanana", "bananawebapi"]
+
+            if is_nanobanana_local:
+                # NanoBanana API：总是使用application/json
+                print(f"[DEBUG] 任务{task['group_id']} 使用NanoBanana JSON格式发送请求")
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.session.post(api_url, headers=headers, json=payload, timeout=config["timeout"])
+                )
+            elif has_images:
+                # Comfly图生图：multipart/form-data
+                print(f"[DEBUG] 任务{task['group_id']} 使用Comfly multipart/form-data发送请求")
+                print(f"[DEBUG] data长度: {len(str(payload['data'])) if 'data' in payload else 'N/A'}")
+                print(f"[DEBUG] files数量: {len(payload['files']) if 'files' in payload else 'N/A'}")
                 request_data = payload["data"]
                 files = payload["files"]
 
@@ -500,30 +654,61 @@ class Banana2BatchNode:
                     lambda: self.session.post(api_url, headers=headers, data=request_data, files=files, timeout=config["timeout"])
                 )
             else:
-                # 文生图：application/json
+                # Comfly文生图：application/json
+                print(f"[DEBUG] 任务{task['group_id']} 使用Comfly JSON格式发送请求")
                 response = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: self.session.post(api_url, headers=headers, json=payload, timeout=config["timeout"])
                 )
 
+            print(f"[DEBUG] 任务{task['group_id']} HTTP响应状态码: {response.status_code}")
+            print(f"[DEBUG] 响应头: {dict(response.headers)}")
+
             if response.status_code == 200:
-                result_data = response.json()
+                print(f"[DEBUG] 任务{task['group_id']} 收到200响应，开始解析JSON...")
+                print(f"[DEBUG] 响应内容长度: {len(response.text)} 字符")
+                print(f"[DEBUG] Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+                print(f"[DEBUG] 原始响应文本前300字符: {response.text[:300]}")
 
-                # ===== 调试信息: API响应详情 =====
-                print(f"[SUCCESS] 任务{task['group_id']} API响应成功:")
-                print(f"  [STATUS] 响应状态码: {response.status_code}")
-                print(f"  [RESPONSE] 响应数据: {result_data}")
-                print(f"  [MODE] 异步模式: {is_comfly_banana}")
-                print("-" * 30)
+                try:
+                    result_data = response.json()
+                    print(f"[SUCCESS] 任务{task['group_id']} JSON解析成功")
+                    print(f"[DEBUG] JSON结构: {type(result_data)}")
+                    if isinstance(result_data, dict):
+                        print(f"[DEBUG] JSON键: {list(result_data.keys())}")
 
-                # Comfly banana模型使用异步模式
-                if is_comfly_banana:
+                    # ===== 调试信息: API响应详情 =====
+                    print(f"[SUCCESS] 任务{task['group_id']} API响应成功:")
+                    print(f"  [STATUS] 响应状态码: {response.status_code}")
+                    print(f"  [RESPONSE] 响应数据: {result_data}")
+                    print(f"  [MODE] 异步模式: {config['provider'] in ['nanobanana', 'bananawebapi'] or (config['provider'] == 'comfly' and 'nano-banana' in config['model'])}")
+                    print("-" * 30)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] 任务{task['group_id']} JSON解析失败: {str(e)}")
+                    print(f"[ERROR] 完整响应文本: {response.text}")
+                    return {
+                        "group_id": task["group_id"],
+                        "success": False,
+                        "image": None,
+                        "url": "",
+                        "response_code": 2,
+                        "info": json.dumps({
+                            "status": "error",
+                            "message": f"JSON解析失败: {str(e)}",
+                            "response_text": response.text
+                        }, ensure_ascii=False)
+                    }
+
+                # Comfly供应商和NanoBanana API使用异步模式
+                is_nanobanana_local = config["provider"] in ["nanobanana", "bananawebapi"]
+                if is_comfly_provider or is_nanobanana_local:
                     return await self._handle_async_response(task["group_id"], result_data, config)
                 else:
                     # 其他供应商使用同步模式
                     return self._parse_sync_response(task["group_id"], result_data, config["response_format"])
             else:
-                print(f"Banana2: 任务{task['group_id']} API请求失败 - {response.status_code}: {response.text}")
+                print(f"[ERROR] 任务{task['group_id']} API请求失败 - {response.status_code}")
+                print(f"[ERROR] 响应内容: {response.text}")
                 return {
                     "group_id": task["group_id"],
                     "success": False,
@@ -531,10 +716,10 @@ class Banana2BatchNode:
                     "url": "",
                     "response_code": 2,
                     "info": json.dumps({
-                    "status": "error",
-                    "message": f"API请求失败 - {response.status_code}",
-                    "response_text": response.text
-                }, ensure_ascii=False)
+                        "status": "error",
+                        "message": f"API请求失败 - {response.status_code}",
+                        "response_text": response.text
+                    }, ensure_ascii=False)
                 }
 
         except requests.exceptions.Timeout:
@@ -568,7 +753,8 @@ class Banana2BatchNode:
         """构建API请求"""
         base_url = config["base_url"].rstrip("/")
         has_images = len(task["images"]) > 0
-        is_comfly_banana = config["provider"] == "comfly" and config["model"].startswith("nano-banana")
+        is_comfly_provider = config["provider"] == "comfly"
+        is_nanobanana = config["provider"] in ["nanobanana", "bananawebapi"]
 
         # 处理aspect_ratio的auto模式
         final_aspect_ratio = config["aspect_ratio"]
@@ -590,13 +776,117 @@ class Banana2BatchNode:
         # 根据mode决定是否使用图像
         use_images = has_images and config["mode"] == "Img2Img"
 
-        if use_images:
+        # NanoBanana API (仅用于nanobanana和bananawebapi供应商)
+        if config["provider"] in ["nanobanana", "bananawebapi"]:
+            # 检查是否使用Pro版本API
+            is_pro_model = config["model"] == "nano-banana-pro"
+
+            if is_pro_model:
+                # Pro版本API
+                api_url = f"{base_url}/api/v1/nanobanana/generate-pro"
+            else:
+                # 普通版本API
+                api_url = f"{base_url}/api/v1/nanobanana/generate"
+
+            headers = {
+                "Authorization": f"Bearer {config['api_key']}",
+                "Content-Type": "application/json"
+            }
+
+            if is_pro_model:
+                # Pro版本API参数格式
+                payload = {
+                    "prompt": task["prompt"],
+                    "resolution": config["img_size"],  # Pro版本使用resolution
+                    "aspectRatio": final_aspect_ratio,  # Pro版本使用aspectRatio
+                    "callBackUrl": base_url  # 使用base_url作为回调地址
+                }
+
+                # 添加图像（Pro版本支持最多8张图片，用于图生图）
+                if use_images:
+                    # 检查是否需要上传图片到OSS
+                    oss_config = config.get("oss_config", {})
+                    if oss_config and all(k in oss_config and oss_config[k] for k in ["endpoint", "access_key_id", "access_key_secret", "bucket_name"]):
+                        # 使用OSS上传图片获取URL
+                        try:
+                            image_urls = _pil_images_to_oss_urls(
+                                images=task["images"][:8],  # Pro版本支持最多8张图片
+                                oss_config=oss_config,
+                                timeout_seconds=min(config["timeout"], 60)
+                            )
+                            payload["imageUrls"] = image_urls
+                            print(f"NanoBanana Pro: 通过OSS上传了 {len(image_urls)} 张参考图片")
+                        except Exception as e:
+                            print(f"NanoBanana Pro: OSS上传失败，尝试使用base64: {e}")
+                            # 降级到base64方式
+                            image_urls = []
+                            for img in task["images"][:4]:  # 降级时限制为4张
+                                try:
+                                    buffer = io.BytesIO()
+                                    img.save(buffer, format="PNG")
+                                    img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                                    image_urls.append(f"data:image/png;base64,{img_base64}")
+                                except Exception as e2:
+                                    print(f"NanoBanana Pro: 图片base64处理失败: {e2}")
+                                    continue
+                            if image_urls:
+                                payload["imageUrls"] = image_urls
+                                print(f"NanoBanana Pro: 使用base64格式添加了 {len(image_urls)} 张参考图片")
+                    else:
+                        # 使用base64格式（兼容旧方式）
+                        print(f"NanoBanana Pro: 未配置OSS，使用base64格式")
+                        image_urls = []
+                        for img in task["images"][:4]:  # 限制为4张图片，避免请求过大
+                            try:
+                                buffer = io.BytesIO()
+                                img.save(buffer, format="PNG")
+                                img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                                image_urls.append(f"data:image/png;base64,{img_base64}")
+                            except Exception as e:
+                                print(f"NanoBanana Pro: 图片处理失败: {e}")
+                                continue
+
+                        if image_urls:
+                            payload["imageUrls"] = image_urls
+                            print(f"NanoBanana Pro: 添加了 {len(image_urls)} 张参考图片（base64格式）")
+
+            else:
+                # 普通版本API参数格式
+                payload = {
+                    "prompt": task["prompt"],
+                    "type": "IMAGETOIAMGE" if use_images else "TEXTTOIAMGE",
+                    "numImages": config["img_n"],
+                    "callBackUrl": ""  # 可以为空，使用轮询模式
+                }
+
+                # 添加图像（如果有的话）
+                if use_images:
+                    # 将PIL图像转换为Base64 URL
+                    image_urls = []
+                    for img in task["images"]:
+                        try:
+                            buffer = io.BytesIO()
+                            img.save(buffer, format="PNG")
+                            img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                            image_urls.append(f"data:image/png;base64,{img_base64}")
+                        except Exception as e:
+                            print(f"NanoBanana: 图片处理失败: {e}")
+                            continue
+
+                    if image_urls:
+                        payload["imageUrls"] = image_urls
+                        print(f"NanoBanana: 添加了 {len(image_urls)} 张参考图片")
+
+            return api_url, headers, payload
+
+        # Comfly API (原有逻辑)
+        elif use_images:
             # 图生图 - 使用multipart/form-data
             api_url = f"{base_url}/v1/images/edits"
             query_params = ""
 
-            # Comfly banana模型使用异步模式
-            if is_comfly_banana:
+            # Comfly供应商使用异步模式
+            if is_comfly_provider:
                 query_params = "?async=true"
                 api_url += query_params
 
@@ -631,8 +921,8 @@ class Banana2BatchNode:
             api_url = f"{base_url}/v1/images/generations"
             query_params = ""
 
-            # Comfly banana模型使用异步模式
-            if is_comfly_banana:
+            # Comfly供应商使用异步模式
+            if is_comfly_provider:
                 query_params = "?async=true"
                 api_url += query_params
 
@@ -656,22 +946,100 @@ class Banana2BatchNode:
         try:
             # 从响应中获取task_id
             task_id = None
-            if "task_id" in response_data:
-                # 直接在响应根层级
-                task_id = response_data["task_id"]
-            elif "data" in response_data and isinstance(response_data["data"], dict) and "task_id" in response_data["data"]:
-                # 在data子对象中
-                task_id = response_data["data"]["task_id"]
-            elif "data" in response_data and isinstance(response_data["data"], str):
-                # data字段直接是task_id字符串
-                task_id = response_data["data"]
+
+            # NanoBanana API响应格式
+            if config["provider"] in ["nanobanana", "bananawebapi"]:
+                print(f"[DEBUG] NanoBanana响应数据类型检查:")
+                print(f"  response_data类型: {type(response_data)}")
+                print(f"  response_data是字典: {isinstance(response_data, dict)}")
+
+                if isinstance(response_data, dict):
+                    print(f"  response_data内容: {response_data}")
+                    code_value = response_data.get("code")
+                    has_data = "data" in response_data
+                    print(f"  code值: {code_value} (类型: {type(code_value)})")
+                    print(f"  包含data字段: {has_data}")
+
+                    if code_value == 200 and has_data:
+                        data_field = response_data["data"]
+                        print(f"  data字段类型: {type(data_field)}")
+                        print(f"  data字段内容: {data_field}")
+
+                        if isinstance(data_field, dict):
+                            task_id = data_field.get("taskId")
+                            print(f"  提取的task_id: {task_id}")
+                        else:
+                            # 处理data字段不是字典的情况
+                            task_id = str(data_field) if data_field else None
+                            print(f"  data不是字典，转换为字符串task_id: {task_id}")
+
+                        if task_id:
+                            provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                            print(f"{provider_name}: 任务{group_id} 异步任务已提交，task_id: {task_id}")
+                            # 开始轮询查询状态
+                            return await self._poll_task_status(group_id, task_id, config)
+                        else:
+                            print(f"NanoBanana: 任务{group_id} 响应中未找到task_id")
+                            return {
+                                "group_id": group_id,
+                                "success": False,
+                                "image": None,
+                                "url": "",
+                                "response_code": 2,
+                                "info": json.dumps({
+                                    "status": "error",
+                                    "message": "响应中未找到task_id",
+                                    "response_data": response_data
+                                }, ensure_ascii=False)
+                            }
+                    else:
+                        print(f"NanoBanana: 任务{group_id} API响应错误: {response_data}")
+                        return {
+                            "group_id": group_id,
+                            "success": False,
+                            "image": None,
+                            "url": "",
+                            "response_code": 2,
+                            "info": json.dumps({
+                                "status": "error",
+                                "message": f"API响应错误: {response_data.get('msg', '未知错误')}",
+                                "response_data": response_data
+                            }, ensure_ascii=False)
+                        }
+                else:
+                    print(f"NanoBanana: 任务{group_id} 响应数据不是字典类型: {type(response_data)}")
+                    return {
+                        "group_id": group_id,
+                        "success": False,
+                        "image": None,
+                        "url": "",
+                        "response_code": 2,
+                        "info": json.dumps({
+                            "status": "error",
+                            "message": f"响应数据类型错误: {type(response_data)}，期望字典类型",
+                            "response_data": str(response_data)
+                        }, ensure_ascii=False)
+                    }
+            # Comfly API响应格式
+            else:
+                if "task_id" in response_data:
+                    # 直接在响应根层级
+                    task_id = response_data["task_id"]
+                elif "data" in response_data and isinstance(response_data["data"], dict) and "task_id" in response_data["data"]:
+                    # 在data子对象中
+                    task_id = response_data["data"]["task_id"]
+                elif "data" in response_data and isinstance(response_data["data"], str):
+                    # data字段直接是task_id字符串
+                    task_id = response_data["data"]
 
             if task_id:
-                print(f"Banana2: 任务{group_id} 异步任务已提交，task_id: {task_id}")
+                provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                print(f"{provider_name}: 任务{group_id} 异步任务已提交，task_id: {task_id}")
                 # 开始轮询查询状态
                 return await self._poll_task_status(group_id, task_id, config)
             else:
-                print(f"Banana2: 任务{group_id} 异步响应中未找到task_id: {response_data}")
+                provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                print(f"{provider_name}: 任务{group_id} 异步响应中未找到task_id: {response_data}")
                 return {
                     "group_id": group_id,
                     "success": False,
@@ -686,7 +1054,8 @@ class Banana2BatchNode:
                 }
 
         except Exception as e:
-            print(f"Banana2: 任务{group_id} 处理异步响应异常 - {str(e)}")
+            provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Banana2"
+            print(f"{provider_name}: 任务{group_id} 处理异步响应异常 - {str(e)}")
             return {
                 "group_id": group_id,
                 "success": False,
@@ -718,8 +1087,11 @@ class Banana2BatchNode:
             poll_count += 1
 
             try:
-                # 构建查询URL
-                query_url = f"{base_url}/v1/images/tasks/{task_id}"
+                # 构建查询URL - NanoBanana API使用不同的查询路径
+                if config["provider"] in ["nanobanana", "bananawebapi"]:
+                    query_url = f"{base_url}/api/v1/nanobanana/record-info?taskId={task_id}"
+                else:
+                    query_url = f"{base_url}/v1/images/tasks/{task_id}"
 
                 # 发送查询请求
                 response = await asyncio.get_event_loop().run_in_executor(
@@ -732,37 +1104,71 @@ class Banana2BatchNode:
 
                     if "data" in status_data:
                         task_info = status_data["data"]
-                        status = task_info.get("status", "")
-                        progress = task_info.get("progress", "0%")
 
-                        print(f"Banana2: 任务{group_id} 状态查询 [{poll_count}] - 状态: {status}, 进度: {progress}")
+                        # NanoBanana API使用不同的状态字段
+                        if config["provider"] in ["nanobanana", "bananawebapi"]:
+                            success_flag = task_info.get("successFlag", 0)
+                            complete_time = task_info.get("completeTime")
+                            error_message = task_info.get("errorMessage")
 
-                        if status == "SUCCESS":
-                            # 任务完成，解析结果
-                            return self._parse_async_success_response(group_id, task_info, config["response_format"])
-
-                        elif status == "FAILURE":
-                            # 任务失败
-                            fail_reason = task_info.get("fail_reason", "未知错误")
-                            print(f"Banana2: 任务{group_id} 生成失败 - {fail_reason}")
-                            return {
-                                "group_id": group_id,
-                                "success": False,
-                                "image": None,
-                                "url": "",
-                                "response_code": 2,
-                                "info": json.dumps(task_info, ensure_ascii=False)
-                            }
-
-                        elif status in ["IN_PROGRESS", "NOT_START", "PENDING"]:
-                            # 任务进行中，继续等待
-                            await asyncio.sleep(5)  # 等待5秒
-                            continue
-
+                            if success_flag == 1 and complete_time is not None:
+                                # 任务成功完成
+                                print(f"NanoBanana: 任务{group_id} 生成成功")
+                                return self._parse_nanobanana_success_response(group_id, task_info, config["response_format"])
+                            elif success_flag == 0 and complete_time is None:
+                                # 任务进行中
+                                print(f"NanoBanana: 任务{group_id} 进行中...")
+                                await asyncio.sleep(5)
+                                continue
+                            else:
+                                # 任务失败
+                                fail_reason = error_message or f"successFlag={success_flag}"
+                                print(f"NanoBanana: 任务{group_id} 生成失败 - {fail_reason}")
+                                return {
+                                    "group_id": group_id,
+                                    "success": False,
+                                    "image": None,
+                                    "url": "",
+                                    "response_code": 2,
+                                    "info": json.dumps({
+                                        "status": "error",
+                                        "message": f"任务失败: {fail_reason}",
+                                        "task_info": task_info
+                                    }, ensure_ascii=False)
+                                }
                         else:
-                            print(f"Banana2: 任务{group_id} 未知状态: {status}")
-                            await asyncio.sleep(5)
-                            continue
+                            # Comfly API使用原有的状态字段
+                            status = task_info.get("status", "")
+                            progress = task_info.get("progress", "0%")
+
+                            print(f"Banana2: 任务{group_id} 状态查询 [{poll_count}] - 状态: {status}, 进度: {progress}")
+
+                            if status == "SUCCESS":
+                                # 任务完成，解析结果
+                                return self._parse_async_success_response(group_id, task_info, config["response_format"])
+
+                            elif status == "FAILURE":
+                                # 任务失败
+                                fail_reason = task_info.get("fail_reason", "未知错误")
+                                print(f"Banana2: 任务{group_id} 生成失败 - {fail_reason}")
+                                return {
+                                    "group_id": group_id,
+                                    "success": False,
+                                    "image": None,
+                                    "url": "",
+                                    "response_code": 2,
+                                    "info": json.dumps(task_info, ensure_ascii=False)
+                                }
+
+                            elif status in ["IN_PROGRESS", "NOT_START", "PENDING"]:
+                                # 任务进行中，继续等待
+                                await asyncio.sleep(5)  # 等待5秒
+                                continue
+
+                            else:
+                                print(f"Banana2: 任务{group_id} 未知状态: {status}")
+                                await asyncio.sleep(5)
+                                continue
 
                     else:
                         print(f"Banana2: 任务{group_id} 状态查询响应格式错误: {status_data}")
@@ -890,6 +1296,156 @@ class Banana2BatchNode:
                     "status": "error",
                     "message": f"异步响应解析异常: {str(e)}",
                     "response_data": task_info
+                }, ensure_ascii=False)
+            }
+
+    def _parse_nanobanana_success_response(self, group_id: int, task_info: Dict[str, Any], response_format: str) -> Dict[str, Any]:
+        """解析NanoBanana API成功响应"""
+        try:
+            response_data = task_info.get("response")
+            if not response_data:
+                print(f"NanoBanana: 任务{group_id} 成功但无响应数据")
+                return {
+                    "group_id": group_id,
+                    "success": False,
+                    "image": None,
+                    "url": "",
+                    "response_code": 2,
+                    "info": json.dumps({
+                        "status": "error",
+                        "message": "任务成功但无响应数据",
+                        "task_info": task_info
+                    }, ensure_ascii=False)
+                }
+
+            # 解析响应数据（可能是JSON字符串或对象）
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except json.JSONDecodeError:
+                    print(f"NanoBanana: 任务{group_id} 响应数据不是有效JSON")
+                    return {
+                        "group_id": group_id,
+                        "success": False,
+                        "image": None,
+                        "url": "",
+                        "response_code": 2,
+                        "info": json.dumps({
+                            "status": "error",
+                            "message": "响应数据格式错误",
+                            "response_data": response_data
+                        }, ensure_ascii=False)
+                    }
+
+            # 解析图片结果 - Pro版本格式
+            if isinstance(response_data, dict):
+                # Pro版本：response是对象，包含resultImageUrl
+                image_url = response_data.get("resultImageUrl", "")
+                if not image_url:
+                    # 尝试originImageUrl
+                    image_url = response_data.get("originImageUrl", "")
+
+                if image_url:
+                    print(f"NanoBanana Pro: 任务{group_id} 找到结果图片URL: {image_url}")
+                    # Pro版本直接返回URL，不需要下载base64
+                    return {
+                        "group_id": group_id,
+                        "success": True,
+                        "image": None,  # URL格式不下载图片
+                        "url": image_url,
+                        "response_code": 1,
+                        "info": json.dumps({
+                            "status": "success",
+                            "message": "图像生成成功",
+                            "format": "url",
+                            "task_info": {
+                                "taskId": task_info.get("taskId"),
+                                "completeTime": task_info.get("completeTime")
+                            }
+                        }, ensure_ascii=False)
+                    }
+
+            # 兼容旧格式：列表格式
+            elif isinstance(response_data, list) and len(response_data) > 0:
+                image_data = response_data[0]
+
+                # 提取URL
+                image_url = image_data.get("url", "")
+                if not image_url:
+                    # 尝试b64_json
+                    b64_data = image_data.get("b64_json", "")
+                    if b64_data:
+                        image_url = f"data:image/png;base64,{b64_data}"
+
+                if image_url:
+                    if image_url.startswith("data:image"):
+                        # base64格式，需要下载转换
+                        image = self._download_image(image_url)
+                        if image:
+                            print(f"NanoBanana: 任务{group_id} 图像生成成功 (Base64)")
+                            return_url = "b64_ok" if response_format == "b64_json" else image_url
+                            return {
+                                "group_id": group_id,
+                                "success": True,
+                                "image": image,
+                                "url": return_url,
+                                "response_code": 1,
+                                "info": json.dumps({
+                                    "status": "success",
+                                    "message": "图像生成成功",
+                                    "format": "base64",
+                                    "task_info": {
+                                        "taskId": task_info.get("taskId"),
+                                        "completeTime": task_info.get("completeTime")
+                                    }
+                                }, ensure_ascii=False)
+                            }
+                    else:
+                        # URL格式，直接返回URL
+                        print(f"NanoBanana: 任务{group_id} 图像生成成功 (URL): {image_url}")
+                        return {
+                            "group_id": group_id,
+                            "success": True,
+                            "image": None,  # URL格式不下载图片
+                            "url": image_url,
+                            "response_code": 1,
+                            "info": json.dumps({
+                                "status": "success",
+                                "message": "图像生成成功",
+                                "format": "url",
+                                "task_info": {
+                                    "taskId": task_info.get("taskId"),
+                                    "completeTime": task_info.get("completeTime")
+                                }
+                            }, ensure_ascii=False)
+                        }
+
+            print(f"NanoBanana: 任务{group_id} 响应解析失败 - {response_data}")
+            return {
+                "group_id": group_id,
+                "success": False,
+                "image": None,
+                "url": "",
+                "response_code": 2,
+                "info": json.dumps({
+                    "status": "error",
+                    "message": "响应解析失败",
+                    "response_data": response_data
+                }, ensure_ascii=False)
+            }
+
+        except Exception as e:
+            print(f"NanoBanana: 任务{group_id} 响应解析异常 - {str(e)}")
+            return {
+                "group_id": group_id,
+                "success": False,
+                "image": None,
+                "url": "",
+                "response_code": 2,
+                "info": json.dumps({
+                    "status": "error",
+                    "message": f"响应解析异常: {str(e)}",
+                    "task_info": task_info
                 }, ensure_ascii=False)
             }
 
