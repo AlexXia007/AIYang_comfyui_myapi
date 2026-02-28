@@ -477,10 +477,10 @@ class ModelCompareNode:
             }
 
         # 根据provider选择处理逻辑
-        # bananawebapi供应商使用NanoBanana API，comfly供应商使用Comfly API
-        is_bananawebapi_provider = provider == "bananawebapi"
+        # BW和grsai供应商使用NanoBanana API，comfly供应商使用Comfly API
+        is_nanobanana_provider = provider in ["BW", "grsai"]
 
-        if is_bananawebapi_provider:
+        if is_nanobanana_provider:
             # NanoBanana API需要特殊处理（OSS上传等）
             return await self._execute_nanobanana_model(task, config, kwargs)
         else:
@@ -569,7 +569,7 @@ class ModelCompareNode:
 
     async def _execute_nanobanana_model(self, task: Dict[str, Any], config: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """执行NanoBanana模型（需要OSS上传）"""
-        provider = config.get("provider", "bananawebapi")
+        provider = config.get("provider", "BW")
 
         # 动态导入 banana2_batch_node
         try:

@@ -5,7 +5,7 @@
 ## 🚀 功能特性
 
 - **🎯 核心要点**:
-  - 双供应商自动适配：Comfly和BananaWebAPI无缝切换
+  - 双供应商自动适配：Comfly和BW无缝切换
   - 智能API路由：根据供应商+模型自动选择正确的接口
   - 异步并发处理：最大5并发，完美支持长时间生成任务
   - OSS图片上传：阿里云OSS集成，解决图片传输问题
@@ -15,7 +15,7 @@
   - 多组图 + 单模型并发 (AIYang007_Banana2Batch)
   - 多组图 + 豆包模型并发 (AIYang007_DoubaoBatch)
   - 单组图 + 多模型比较 (AIYang007_ModelCompare)
-- **🔄 双供应商支持**: Comfly + BananaWebAPI，自动适配API格式
+- **🔄 三供应商支持**: Comfly + BW + grsai，自动适配API格式
 - **🧠 智能任务调度**: 自动识别有效任务，支持文生图、图生图模式
 - **🛡️ 完善的错误处理**: 支持超时重试，详细的状态反馈和错误隔离
 - **🎨 ComfyUI原生支持**: 完全兼容ComfyUI的工作流系统和图像处理
@@ -49,7 +49,7 @@
 ## 🚀 快速开始
 
 1. **选择节点**: 在ComfyUI中找到"AIYang007_Banana2Batch"节点
-2. **配置供应商**: 设置provider为"comfly"或"bananawebapi"
+2. **配置供应商**: 设置provider为"comfly"、"BW"或"grsai"
 3. **输入API密钥**: 在api_key参数中填入对应的密钥
 4. **选择模型**: 根据供应商选择合适的模型
 5. **输入提示词**: 在prompt_1中输入生成描述
@@ -61,9 +61,9 @@
 
 | 节点名称 | 功能场景 | 并发模式 | 支持供应商 | 支持模型 |
 |---------|---------|---------|---------|---------|
-| **AIYang007_Banana2Batch** | 多组图 + 单模型并发 | 10组任务并发 | comfly, bananawebapi | nano-banana系列 |
+| **AIYang007_Banana2Batch** | 多组图 + 单模型并发 | 10组任务并发 | comfly, BW, grsai | nano-banana系列 |
 | **AIYang007_DoubaoBatch** | 多组图 + 单豆包模型并发 | 10组任务并发 | comfly | doubao-seedream系列 |
-| **AIYang007_ModelCompare** | 单组图 + 多模型比较 | 双模型并发 | comfly, bananawebapi | banana + doubao |
+| **AIYang007_ModelCompare** | 单组图 + 多模型比较 | 双模型并发 | comfly, BW | banana + doubao |
 
 ### 节点位置
 在ComfyUI中搜索对应节点名称，或在 "AIYang007_myapi" 分类下找到节点
@@ -80,7 +80,7 @@
 #### 配置参数
 - `provider`: API供应商选择
   - "comfly": Comfly平台 (默认)
-  - "bananawebapi": BananaWebAPI平台
+  - "BW": BananaWebAPI平台
 - `base_url`: API基础地址
   - Comfly: "https://ai.comfly.chat"
   - BananaWebAPI: 对应平台的API地址
@@ -126,7 +126,7 @@
 #### AIYang007_Banana2Batch (多组图 + 单模型并发)
 **适用场景**: 批量生成多个不同主题的图像
 
-1. 选择供应商: "comfly" 或 "bananawebapi"
+1. 选择供应商: "comfly" 或 "BW"
 2. 配置模型:
    - Comfly: nano-banana-2, nano-banana-pro等
    - BananaWebAPI: nano-banana系列模型

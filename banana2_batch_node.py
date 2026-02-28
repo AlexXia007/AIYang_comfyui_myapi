@@ -624,7 +624,7 @@ class Banana2BatchNode:
             print(f"[DEBUG] 任务{task['group_id']} 开始发送请求, has_images={has_images}, 图片数量={len(task['images'])}")
 
             # 检查是否使用NanoBanana API（总是使用JSON）
-            is_nanobanana_local = config["provider"] in ["nanobanana", "bananawebapi"]
+            is_nanobanana_local = config["provider"] in ["BW", "grsai"]
 
             if is_nanobanana_local:
                 # NanoBanana API：总是使用application/json
@@ -681,7 +681,7 @@ class Banana2BatchNode:
                     print(f"[SUCCESS] 任务{task['group_id']} API响应成功:")
                     print(f"  [STATUS] 响应状态码: {response.status_code}")
                     print(f"  [RESPONSE] 响应数据: {result_data}")
-                    print(f"  [MODE] 异步模式: {config['provider'] in ['nanobanana', 'bananawebapi'] or (config['provider'] == 'comfly' and 'nano-banana' in config['model'])}")
+                    print(f"  [MODE] 异步模式: {config['provider'] in ['BW', 'grsai'] or (config['provider'] == 'comfly' and 'nano-banana' in config['model'])}")
                     print("-" * 30)
                 except json.JSONDecodeError as e:
                     print(f"[ERROR] 任务{task['group_id']} JSON解析失败: {str(e)}")
@@ -700,7 +700,7 @@ class Banana2BatchNode:
                     }
 
                 # Comfly供应商和NanoBanana API使用异步模式
-                is_nanobanana_local = config["provider"] in ["nanobanana", "bananawebapi"]
+                is_nanobanana_local = config["provider"] in ["BW", "grsai"]
                 if is_comfly_provider or is_nanobanana_local:
                     return await self._handle_async_response(task["group_id"], result_data, config)
                 else:
@@ -754,7 +754,7 @@ class Banana2BatchNode:
         base_url = config["base_url"].rstrip("/")
         has_images = len(task["images"]) > 0
         is_comfly_provider = config["provider"] == "comfly"
-        is_nanobanana = config["provider"] in ["nanobanana", "bananawebapi"]
+        is_nanobanana = config["provider"] in ["BW", "grsai"]
 
         # 处理aspect_ratio的auto模式
         final_aspect_ratio = config["aspect_ratio"]
@@ -776,8 +776,8 @@ class Banana2BatchNode:
         # 根据mode决定是否使用图像
         use_images = has_images and config["mode"] == "Img2Img"
 
-        # NanoBanana API (仅用于nanobanana和bananawebapi供应商)
-        if config["provider"] in ["nanobanana", "bananawebapi"]:
+        # NanoBanana API (仅用于BW供应商，不包括grsai)
+        if config["provider"] in ["BW"]:
             # 检查是否使用Pro版本API
             is_pro_model = config["model"] == "nano-banana-pro"
 
@@ -879,6 +879,50 @@ class Banana2BatchNode:
 
             return api_url, headers, payload
 
+        # grsai API
+        elif config["provider"] == "grsai":
+            # grsai NanoBanana API
+            api_url = f"{base_url}/v1/draw/nano-banana"
+
+            headers = {
+                "Authorization": f"Bearer {config['api_key']}",
+                "Content-Type": "application/json"
+            }
+
+            # 构建请求参数
+            # 将comfly的img_size转换为grsai的imageSize格式
+            size_mapping = {"1K": "1K", "2K": "2K", "4K": "4K"}
+            grsai_image_size = size_mapping.get(config["img_size"], "1K")
+
+            payload = {
+                "model": config["model"],
+                "prompt": task["prompt"],
+                "aspectRatio": final_aspect_ratio,
+                "imageSize": grsai_image_size,
+                "webHook": "-1",  # 立即返回id，使用轮询模式
+                "shutProgress": False
+            }
+
+            # 添加图像（图生图模式）
+            if use_images:
+                # 将PIL图像转换为Base64 URL
+                image_urls = []
+                for img in task["images"]:
+                    try:
+                        buffer = io.BytesIO()
+                        img.save(buffer, format="PNG")
+                        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        image_urls.append(f"data:image/png;base64,{img_base64}")
+                    except Exception as e:
+                        print(f"grsai: 图片处理失败: {e}")
+                        continue
+
+                if image_urls:
+                    payload["urls"] = image_urls
+                    print(f"grsai: 添加了 {len(image_urls)} 张参考图片")
+
+            return api_url, headers, payload
+
         # Comfly API (原有逻辑)
         elif use_images:
             # 图生图 - 使用multipart/form-data
@@ -947,8 +991,8 @@ class Banana2BatchNode:
             # 从响应中获取task_id
             task_id = None
 
-            # NanoBanana API响应格式
-            if config["provider"] in ["nanobanana", "bananawebapi"]:
+            # NanoBanana API响应格式 (包括grsai)
+            if config["provider"] in ["BW"]:
                 print(f"[DEBUG] NanoBanana响应数据类型检查:")
                 print(f"  response_data类型: {type(response_data)}")
                 print(f"  response_data是字典: {isinstance(response_data, dict)}")
@@ -974,7 +1018,7 @@ class Banana2BatchNode:
                             print(f"  data不是字典，转换为字符串task_id: {task_id}")
 
                         if task_id:
-                            provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                            provider_name = "NanoBanana" if config["provider"] in ["BW"] else ("grsai" if config["provider"] == "grsai" else "Comfly")
                             print(f"{provider_name}: 任务{group_id} 异步任务已提交，task_id: {task_id}")
                             # 开始轮询查询状态
                             return await self._poll_task_status(group_id, task_id, config)
@@ -1020,6 +1064,58 @@ class Banana2BatchNode:
                             "response_data": str(response_data)
                         }, ensure_ascii=False)
                     }
+
+            # grsai API响应格式
+            elif config["provider"] == "grsai":
+                print(f"[DEBUG] grsai响应数据类型检查:")
+                print(f"  response_data类型: {type(response_data)}")
+                print(f"  response_data内容: {response_data}")
+
+                if isinstance(response_data, dict):
+                    code_value = response_data.get("code")
+                    data_field = response_data.get("data")
+
+                    # grsai成功码是0
+                    if code_value == 0 and data_field:
+                        if isinstance(data_field, dict):
+                            task_id = data_field.get("id")
+                            print(f"  grsai提取的task_id: {task_id}")
+
+                            if task_id:
+                                print(f"grsai: 任务{group_id} 异步任务已提交，task_id: {task_id}")
+                                # 开始轮询查询状态
+                                return await self._poll_task_status(group_id, task_id, config)
+                        else:
+                            print(f"grsai: 任务{group_id} data字段不是字典类型: {type(data_field)}")
+
+                    print(f"grsai: 任务{group_id} API响应错误: {response_data}")
+                    return {
+                        "group_id": group_id,
+                        "success": False,
+                        "image": None,
+                        "url": "",
+                        "response_code": 2,
+                        "info": json.dumps({
+                            "status": "error",
+                            "message": f"API响应错误: {response_data.get('msg', '未知错误')}",
+                            "response_data": response_data
+                        }, ensure_ascii=False)
+                    }
+                else:
+                    print(f"grsai: 任务{group_id} 响应数据不是字典类型: {type(response_data)}")
+                    return {
+                        "group_id": group_id,
+                        "success": False,
+                        "image": None,
+                        "url": "",
+                        "response_code": 2,
+                        "info": json.dumps({
+                            "status": "error",
+                            "message": f"响应数据类型错误: {type(response_data)}，期望字典类型",
+                            "response_data": str(response_data)
+                        }, ensure_ascii=False)
+                    }
+
             # Comfly API响应格式
             else:
                 if "task_id" in response_data:
@@ -1033,12 +1129,12 @@ class Banana2BatchNode:
                     task_id = response_data["data"]
 
             if task_id:
-                provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                provider_name = "NanoBanana" if config["provider"] in ["BW"] else ("grsai" if config["provider"] == "grsai" else "Comfly")
                 print(f"{provider_name}: 任务{group_id} 异步任务已提交，task_id: {task_id}")
                 # 开始轮询查询状态
                 return await self._poll_task_status(group_id, task_id, config)
             else:
-                provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Comfly"
+                provider_name = "NanoBanana" if config["provider"] in ["BW"] else ("grsai" if config["provider"] == "grsai" else "Comfly")
                 print(f"{provider_name}: 任务{group_id} 异步响应中未找到task_id: {response_data}")
                 return {
                     "group_id": group_id,
@@ -1054,7 +1150,7 @@ class Banana2BatchNode:
                 }
 
         except Exception as e:
-            provider_name = "NanoBanana" if config["provider"] in ["nanobanana", "bananawebapi"] else "Banana2"
+            provider_name = "NanoBanana" if config["provider"] in ["BW"] else ("grsai" if config["provider"] == "grsai" else "Banana2")
             print(f"{provider_name}: 任务{group_id} 处理异步响应异常 - {str(e)}")
             return {
                 "group_id": group_id,
@@ -1088,16 +1184,31 @@ class Banana2BatchNode:
 
             try:
                 # 构建查询URL - NanoBanana API使用不同的查询路径
-                if config["provider"] in ["nanobanana", "bananawebapi"]:
+                if config["provider"] in ["BW"]:
                     query_url = f"{base_url}/api/v1/nanobanana/record-info?taskId={task_id}"
+                    query_method = "GET"
+                    query_body = None
+                elif config["provider"] == "grsai":
+                    # grsai使用POST请求
+                    query_url = f"{base_url}/v1/draw/result"
+                    query_method = "POST"
+                    query_body = {"id": task_id}
                 else:
                     query_url = f"{base_url}/v1/images/tasks/{task_id}"
+                    query_method = "GET"
+                    query_body = None
 
                 # 发送查询请求
-                response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.session.get(query_url, headers=headers, timeout=30)
-                )
+                if query_method == "POST":
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.session.post(query_url, headers=headers, json=query_body, timeout=30)
+                    )
+                else:
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.session.get(query_url, headers=headers, timeout=30)
+                    )
 
                 if response.status_code == 200:
                     status_data = response.json()
@@ -1105,8 +1216,8 @@ class Banana2BatchNode:
                     if "data" in status_data:
                         task_info = status_data["data"]
 
-                        # NanoBanana API使用不同的状态字段
-                        if config["provider"] in ["nanobanana", "bananawebapi"]:
+                        # NanoBanana API使用不同的状态字段 (不包括grsai)
+                        if config["provider"] in ["BW"]:
                             success_flag = task_info.get("successFlag", 0)
                             complete_time = task_info.get("completeTime")
                             error_message = task_info.get("errorMessage")
@@ -1136,6 +1247,41 @@ class Banana2BatchNode:
                                         "task_info": task_info
                                     }, ensure_ascii=False)
                                 }
+
+                        # grsai API使用不同的状态字段
+                        elif config["provider"] == "grsai":
+                            status = task_info.get("status", "")
+                            progress = task_info.get("progress", 0)
+                            failure_reason = task_info.get("failure_reason", "")
+                            error_msg = task_info.get("error", "")
+
+                            print(f"grsai: 任务{group_id} 状态查询 [{poll_count}] - 状态: {status}, 进度: {progress}%")
+
+                            if status == "succeeded":
+                                # 任务成功完成
+                                print(f"grsai: 任务{group_id} 生成成功")
+                                return self._parse_grsai_success_response(group_id, task_info, config["response_format"])
+                            elif status == "failed":
+                                # 任务失败
+                                fail_reason = failure_reason or error_msg or "未知错误"
+                                print(f"grsai: 任务{group_id} 生成失败 - {fail_reason}")
+                                return {
+                                    "group_id": group_id,
+                                    "success": False,
+                                    "image": None,
+                                    "url": "",
+                                    "response_code": 2,
+                                    "info": json.dumps({
+                                        "status": "error",
+                                        "message": f"任务失败: {fail_reason}",
+                                        "task_info": task_info
+                                    }, ensure_ascii=False)
+                                }
+                            else:
+                                # 任务进行中 (running)
+                                print(f"grsai: 任务{group_id} 进行中... (状态: {status})")
+                                await asyncio.sleep(5)
+                                continue
                         else:
                             # Comfly API使用原有的状态字段
                             status = task_info.get("status", "")
@@ -1436,6 +1582,80 @@ class Banana2BatchNode:
 
         except Exception as e:
             print(f"NanoBanana: 任务{group_id} 响应解析异常 - {str(e)}")
+            return {
+                "group_id": group_id,
+                "success": False,
+                "image": None,
+                "url": "",
+                "response_code": 2,
+                "info": json.dumps({
+                    "status": "error",
+                    "message": f"响应解析异常: {str(e)}",
+                    "task_info": task_info
+                }, ensure_ascii=False)
+            }
+
+    def _parse_grsai_success_response(self, group_id: int, task_info: Dict[str, Any], response_format: str) -> Dict[str, Any]:
+        """解析grsai API成功响应"""
+        try:
+            # grsai响应格式: {"id": "xxx", "results": [{"url": "xxx", "content": "xxx"}], "progress": 100, "status": "succeeded", ...}
+            results = task_info.get("results", [])
+
+            if not results:
+                print(f"grsai: 任务{group_id} 成功但无结果数据")
+                return {
+                    "group_id": group_id,
+                    "success": False,
+                    "image": None,
+                    "url": "",
+                    "response_code": 2,
+                    "info": json.dumps({
+                        "status": "error",
+                        "message": "任务成功但无结果数据",
+                        "task_info": task_info
+                    }, ensure_ascii=False)
+                }
+
+            # 提取第一张图片的URL
+            result_data = results[0]
+            image_url = result_data.get("url", "")
+
+            if image_url:
+                print(f"grsai: 任务{group_id} 图像生成成功 (URL): {image_url}")
+                return {
+                    "group_id": group_id,
+                    "success": True,
+                    "image": None,  # URL格式不下载图片
+                    "url": image_url,
+                    "response_code": 1,
+                    "info": json.dumps({
+                        "status": "success",
+                        "message": "图像生成成功",
+                        "format": "url",
+                        "task_info": {
+                            "id": task_info.get("id"),
+                            "status": task_info.get("status"),
+                            "progress": task_info.get("progress")
+                        }
+                    }, ensure_ascii=False)
+                }
+
+            print(f"grsai: 任务{group_id} 结果中无URL - {task_info}")
+            return {
+                "group_id": group_id,
+                "success": False,
+                "image": None,
+                "url": "",
+                "response_code": 2,
+                "info": json.dumps({
+                    "status": "error",
+                    "message": "结果中无URL",
+                    "task_info": task_info
+                }, ensure_ascii=False)
+            }
+
+        except Exception as e:
+            print(f"grsai: 任务{group_id} 响应解析异常 - {str(e)}")
             return {
                 "group_id": group_id,
                 "success": False,
